@@ -14,6 +14,7 @@ build:
   stage: build
   script:
     - mvn clean package
+
   artifacts:
     paths:
       - target/*.jar
@@ -25,19 +26,27 @@ docker-build:
   services:
     - docker:27-dind
 
+  needs:
+    - build
+
   script:
     - docker version
+    - ls target
     - docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
 
 push-image:
-  image: amazon/aws-cli:latest
+  image: docker:27
   stage: push
 
   services:
     - docker:27-dind
 
+  needs:
+    - docker-build
+
   before_script:
-    - yum install -y docker || true
+    - apk add --no-cache python3 py3-pip
+    - pip3 install awscli
 
   script:
     - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
