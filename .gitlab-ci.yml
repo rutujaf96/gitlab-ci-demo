@@ -1,0 +1,45 @@
+image: maven:3.9.9-eclipse-temurin-21
+
+stages:
+  - build
+  - docker
+  - push
+
+variables:
+  IMAGE_TAG: $CI_COMMIT_SHORT_SHA
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
+
+build:
+  stage: build
+  script:
+    - mvn clean package
+  artifacts:
+    paths:
+      - target/*.jar
+
+docker-build:
+  image: docker:27
+  stage: docker
+
+  services:
+    - docker:27-dind
+
+  script:
+    - docker version
+    - docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+
+push-image:
+  image: amazon/aws-cli:latest
+  stage: push
+
+  services:
+    - docker:27-dind
+
+  before_script:
+    - yum install -y docker || true
+
+  script:
+    - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+    - docker tag $ECR_REPOSITORY:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+    - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
