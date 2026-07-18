@@ -42,23 +42,18 @@ docker-build:
 
 push-image:
   stage: push
-  image: amazon/aws-cli:latest
-
-  tags:
-    - docker
+  image: docker:28
 
   services:
     - docker:28-dind
 
-  needs:
-    - docker-build
-
   before_script:
-    - docker version
+    - apk add --no-cache python3 py3-pip
+    - pip3 install --break-system-packages awscli
     - aws --version
+    - docker version
 
   script:
-    - echo "Login to ECR"
     - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
     - docker tag $ECR_REPOSITORY:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
     - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
