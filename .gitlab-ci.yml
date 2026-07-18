@@ -3,7 +3,6 @@ image: maven:3.9.9-eclipse-temurin-21
 stages:
   - build
   - docker
-  - push
 
 variables:
   IMAGE_TAG: $CI_COMMIT_SHORT_SHA
@@ -12,8 +11,6 @@ variables:
 
 build:
   stage: build
-  tags:
-    - docker
 
   script:
     - mvn clean package
@@ -22,30 +19,15 @@ build:
     paths:
       - target/*.jar
 
-docker-build:
+docker-build-push:
   stage: docker
   image: docker:28
-
-  tags:
-    - docker
 
   services:
     - docker:28-dind
 
   needs:
     - build
-
-  script:
-    - docker version
-    - ls -l target
-    - docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
-
-push-image:
-  stage: push
-  image: docker:28
-
-  services:
-    - docker:28-dind
 
   before_script:
     - apk add --no-cache python3 py3-pip
@@ -54,6 +36,14 @@ push-image:
     - docker version
 
   script:
+    - echo "Building Docker Image..."
+    - docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+
+    - echo "Logging into Amazon ECR..."
     - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+
+    - echo "Tagging Image..."
     - docker tag $ECR_REPOSITORY:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+
+    - echo "Pushing Image..."
     - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
