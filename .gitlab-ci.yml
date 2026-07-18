@@ -20,11 +20,11 @@ build:
       - target/*.jar
 
 docker-build:
-  image: docker:27
+  image: docker:28
   stage: docker
 
   services:
-    - docker:27-dind
+    - docker:28-dind
 
   needs:
     - build
@@ -35,11 +35,11 @@ docker-build:
     - docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
 
 push-image:
-  image: docker:27
+  image: docker:28
   stage: push
 
   services:
-    - docker:27-dind
+    - docker:28-dind
 
   needs:
     - docker-build
