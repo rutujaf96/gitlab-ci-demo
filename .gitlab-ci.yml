@@ -3,6 +3,7 @@ image: maven:3.9.9-eclipse-temurin-21
 stages:
   - build
   - docker
+  - push
 
 variables:
   IMAGE_TAG: $CI_COMMIT_SHORT_SHA
@@ -11,35 +12,75 @@ variables:
 
 build:
   stage: build
+  tags:
+    - docker
+
   script:
+    - echo "Building Maven Project..."
     - mvn clean package
 
   artifacts:
     paths:
       - target/*.jar
+    expire_in: 1 hour
 
-docker-build-push:
-  image: docker:28
+docker-build:
   stage: docker
+  image: docker:27
+
+  tags:
+    - docker
 
   services:
-    - docker:28-dind
+    - name: docker:27-dind
 
   needs:
     - build
 
+  script:
+    - echo "Checking Variables..."
+    - echo "Repository : $ECR_REPOSITORY"
+    - echo "Image Tag  : $IMAGE_TAG"
+
+    - echo "Checking Docker..."
+    - docker version
+
+    - echo "Checking JAR..."
+    - ls -l target/
+
+    - echo "Building Docker Image..."
+    - docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+
+    - docker images
+
+push-image:
+  stage: push
+  image: docker:27
+
+  tags:
+    - docker
+
+  services:
+    - name: docker:27-dind
+
+  needs:
+    - docker-build
+
   before_script:
-    - apk add --no-cache aws-cli
+    - apk add --no-cache python3 py3-pip
+    - pip3 install awscli
+    - aws --version
+    - docker version
 
   script:
-    - docker version
-    - aws --version
-    - ls target
-
-    - docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+    - echo "Logging into Amazon ECR..."
 
     - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 
+    - echo "Tagging Image..."
+
     - docker tag $ECR_REPOSITORY:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+
+    - echo "Pushing Image..."
 
     - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
