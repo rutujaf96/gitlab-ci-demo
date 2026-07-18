@@ -26,13 +26,13 @@ build:
 
 docker-build:
   stage: docker
-  image: docker:27
+  image: docker:28
 
   tags:
     - docker
 
   services:
-    - name: docker:27-dind
+    - name: docker:28-dind
 
   needs:
     - build
@@ -55,13 +55,13 @@ docker-build:
 
 push-image:
   stage: push
-  image: docker:27
+  image: docker:28
 
   tags:
     - docker
 
   services:
-    - name: docker:27-dind
+    - name: docker:28-dind
 
   needs:
     - docker-build
