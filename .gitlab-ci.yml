@@ -13,7 +13,6 @@ build:
   stage: build
 
   script:
-    - echo "Building Maven Project..."
     - mvn clean package
 
   artifacts:
@@ -22,7 +21,6 @@ build:
 
 docker-build-push:
   stage: docker
-
   image: docker:28
 
   services:
@@ -32,26 +30,20 @@ docker-build-push:
     - build
 
   before_script:
-    - apk add --no-cache python3 py3-pip
+    - apk add --no-cache curl python3 py3-pip
     - pip3 install --break-system-packages awscli
 
     - aws --version
     - docker version
 
-    # Verify IAM Role
+    - echo "AWS Identity"
     - aws sts get-caller-identity
 
   script:
-    - echo "Building Docker Image..."
     - docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
 
-    - echo "Login to Amazon ECR..."
     - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 
-    - echo "Tagging Image..."
     - docker tag $ECR_REPOSITORY:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
 
-    - echo "Pushing Image..."
     - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
-
-    - echo "Pipeline Completed Successfully!"
