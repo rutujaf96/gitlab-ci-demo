@@ -3,6 +3,7 @@ image: maven:3.9.9-eclipse-temurin-21
 stages:
   - build
   - docker
+  - deploy
 
 variables:
   IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
@@ -25,11 +26,6 @@ build:
       - target/*.jar
     expire_in: 1 hour
 
-  cache:
-    key: maven-cache
-    paths:
-      - .m2/repository/
-
 docker-build-push:
   stage: docker
   image: docker:28
@@ -43,24 +39,8 @@ docker-build-push:
 
   before_script:
     - apk add --no-cache aws-cli curl
-    - aws --version
-    - docker version
-
-    - echo "Checking EC2 metadata..."
-    - |
-      TOKEN=$(curl --silent --show-error --fail \
-        --request PUT \
-        "http://169.254.169.254/latest/api/token" \
-        --header "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-
-      ROLE_NAME=$(curl --silent --show-error --fail \
-        --header "X-aws-ec2-metadata-token: $TOKEN" \
-        "http://169.254.169.254/latest/meta-data/iam/security-credentials/")
-
-      echo "IAM role detected: $ROLE_NAME"
-
-    - echo "AWS identity:"
     - aws sts get-caller-identity
+    - docker version
 
   script:
     - export ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
@@ -69,7 +49,7 @@ docker-build-push:
     - echo "Building Docker image..."
     - docker build --tag "$ECR_IMAGE" .
 
-    - echo "Logging in to Amazon ECR..."
+    - echo "Logging in to ECR..."
     - |
       aws ecr get-login-password \
         --region "$AWS_DEFAULT_REGION" |
@@ -77,11 +57,59 @@ docker-build-push:
         --username AWS \
         --password-stdin "$ECR_REGISTRY"
 
-    - echo "Pushing Docker image..."
+    - echo "Pushing image..."
     - docker push "$ECR_IMAGE"
 
-    - echo "Successfully pushed:"
+    - echo "Image pushed successfully:"
     - echo "$ECR_IMAGE"
+
+deploy-to-ec2:
+  stage: deploy
+  image: alpine:3.22
+
+  tags:
+    - docker
+
+  needs:
+    - docker-build-push
+
+  before_script:
+    - apk add --no-cache openssh-client
+    - chmod 600 "$SSH_PRIVATE_KEY"
+
+  script:
+    - echo "Deploying image tag $IMAGE_TAG to EC2..."
+
+    - |
+      ssh \
+        -i "$SSH_PRIVATE_KEY" \
+        -o StrictHostKeyChecking=no \
+        "ubuntu@$TARGET_EC2_IP" \
+        "mkdir -p /home/ubuntu/deployment"
+
+    - |
+      scp \
+        -i "$SSH_PRIVATE_KEY" \
+        -o StrictHostKeyChecking=no \
+        deploy.sh \
+        "ubuntu@$TARGET_EC2_IP:/home/ubuntu/deployment/deploy.sh"
+
+    - |
+      ssh \
+        -i "$SSH_PRIVATE_KEY" \
+        -o StrictHostKeyChecking=no \
+        "ubuntu@$TARGET_EC2_IP" \
+        "
+        chmod +x /home/ubuntu/deployment/deploy.sh &&
+        AWS_ACCOUNT_ID='$AWS_ACCOUNT_ID' \
+        AWS_DEFAULT_REGION='$AWS_DEFAULT_REGION' \
+        ECR_REPOSITORY='$ECR_REPOSITORY' \
+        IMAGE_TAG='$IMAGE_TAG' \
+        CONTAINER_NAME='springboot-app' \
+        HOST_PORT='8080' \
+        CONTAINER_PORT='8080' \
+        /home/ubuntu/deployment/deploy.sh
+        "
 
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
