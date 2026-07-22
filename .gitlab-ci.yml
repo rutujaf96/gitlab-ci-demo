@@ -7,10 +7,17 @@ stages:
 
 variables:
   IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
+  CONTAINER_NAME: "springboot-app"
+  HOST_PORT: "8080"
+  CONTAINER_PORT: "8080"
+
   AWS_EC2_METADATA_DISABLED: "false"
   AWS_METADATA_SERVICE_TIMEOUT: "5"
   AWS_METADATA_SERVICE_NUM_ATTEMPTS: "3"
 
+# =========================================================
+# 1. Build Spring Boot application
+# =========================================================
 build:
   stage: build
 
@@ -18,7 +25,7 @@ build:
     - docker
 
   script:
-    - echo "Building Maven application..."
+    - echo "Building Spring Boot Maven application..."
     - mvn clean package
 
   artifacts:
@@ -26,6 +33,13 @@ build:
       - target/*.jar
     expire_in: 1 hour
 
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+
+# =========================================================
+# 2. Build Docker image and push it to Amazon ECR
+# =========================================================
 docker-build-push:
   stage: docker
   image: docker:28
@@ -39,30 +53,57 @@ docker-build-push:
 
   before_script:
     - apk add --no-cache aws-cli curl
+
+    - |
+      test -n "$AWS_ACCOUNT_ID" || {
+        echo "ERROR: AWS_ACCOUNT_ID is missing"
+        exit 1
+      }
+
+    - |
+      test -n "$AWS_DEFAULT_REGION" || {
+        echo "ERROR: AWS_DEFAULT_REGION is missing"
+        exit 1
+      }
+
+    - |
+      test -n "$ECR_REPOSITORY" || {
+        echo "ERROR: ECR_REPOSITORY is missing"
+        exit 1
+      }
+
     - aws sts get-caller-identity
     - docker version
 
   script:
-    - export ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
-    - export ECR_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+    - export ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+    - export ECR_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 
     - echo "Building Docker image..."
-    - docker build --tag "$ECR_IMAGE" .
+    - echo "Image name is ${ECR_IMAGE}"
+    - docker build --tag "${ECR_IMAGE}" .
 
-    - echo "Logging in to ECR..."
+    - echo "Logging in to Amazon ECR..."
     - |
       aws ecr get-login-password \
-        --region "$AWS_DEFAULT_REGION" |
+        --region "${AWS_DEFAULT_REGION}" |
       docker login \
         --username AWS \
-        --password-stdin "$ECR_REGISTRY"
+        --password-stdin "${ECR_REGISTRY}"
 
-    - echo "Pushing image..."
-    - docker push "$ECR_IMAGE"
+    - echo "Pushing Docker image to ECR..."
+    - docker push "${ECR_IMAGE}"
 
-    - echo "Image pushed successfully:"
-    - echo "$ECR_IMAGE"
+    - echo "Docker image pushed successfully"
+    - echo "${ECR_IMAGE}"
 
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+
+# =========================================================
+# 3. Deploy ECR image on Terraform-created EC2
+# =========================================================
 deploy-to-ec2:
   stage: deploy
   image: alpine:3.22
@@ -71,45 +112,81 @@ deploy-to-ec2:
     - docker
 
   needs:
-    - docker-build-push
+    - job: docker-build-push
+      artifacts: false
 
   before_script:
     - apk add --no-cache openssh-client
+
+    - |
+      test -n "$SSH_PRIVATE_KEY" || {
+        echo "ERROR: SSH_PRIVATE_KEY variable is missing"
+        exit 1
+      }
+
+    - |
+      test -f "$SSH_PRIVATE_KEY" || {
+        echo "ERROR: SSH_PRIVATE_KEY must be configured as a File-type GitLab variable"
+        exit 1
+      }
+
+    - |
+      test -n "$TARGET_EC2_IP" || {
+        echo "ERROR: TARGET_EC2_IP variable is missing"
+        exit 1
+      }
+
     - chmod 600 "$SSH_PRIVATE_KEY"
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+
+    - echo "Adding target EC2 host key..."
+    - ssh-keyscan -H "$TARGET_EC2_IP" >> ~/.ssh/known_hosts
+    - chmod 600 ~/.ssh/known_hosts
 
   script:
-    - echo "Deploying image tag $IMAGE_TAG to EC2..."
+    - echo "Deploying image tag ${IMAGE_TAG} to EC2 ${TARGET_EC2_IP}..."
 
     - |
       ssh \
         -i "$SSH_PRIVATE_KEY" \
-        -o StrictHostKeyChecking=no \
-        "ubuntu@$TARGET_EC2_IP" \
+        -o BatchMode=yes \
+        -o ConnectTimeout=20 \
+        "ubuntu@${TARGET_EC2_IP}" \
         "mkdir -p /home/ubuntu/deployment"
 
     - |
       scp \
         -i "$SSH_PRIVATE_KEY" \
-        -o StrictHostKeyChecking=no \
+        -o BatchMode=yes \
+        -o ConnectTimeout=20 \
         deploy.sh \
-        "ubuntu@$TARGET_EC2_IP:/home/ubuntu/deployment/deploy.sh"
+        "ubuntu@${TARGET_EC2_IP}:/home/ubuntu/deployment/deploy.sh"
 
     - |
       ssh \
         -i "$SSH_PRIVATE_KEY" \
-        -o StrictHostKeyChecking=no \
-        "ubuntu@$TARGET_EC2_IP" \
+        -o BatchMode=yes \
+        -o ConnectTimeout=20 \
+        "ubuntu@${TARGET_EC2_IP}" \
         "
-        chmod +x /home/ubuntu/deployment/deploy.sh &&
-        AWS_ACCOUNT_ID='$AWS_ACCOUNT_ID' \
-        AWS_DEFAULT_REGION='$AWS_DEFAULT_REGION' \
-        ECR_REPOSITORY='$ECR_REPOSITORY' \
-        IMAGE_TAG='$IMAGE_TAG' \
-        CONTAINER_NAME='springboot-app' \
-        HOST_PORT='8080' \
-        CONTAINER_PORT='8080' \
-        /home/ubuntu/deployment/deploy.sh
+          chmod +x /home/ubuntu/deployment/deploy.sh &&
+          sudo \
+          AWS_ACCOUNT_ID='${AWS_ACCOUNT_ID}' \
+          AWS_DEFAULT_REGION='${AWS_DEFAULT_REGION}' \
+          ECR_REPOSITORY='${ECR_REPOSITORY}' \
+          IMAGE_TAG='${IMAGE_TAG}' \
+          CONTAINER_NAME='${CONTAINER_NAME}' \
+          HOST_PORT='${HOST_PORT}' \
+          CONTAINER_PORT='${CONTAINER_PORT}' \
+          /home/ubuntu/deployment/deploy.sh
         "
+
+    - echo "Deployment completed successfully"
+
+  environment:
+    name: production
+    url: "http://${TARGET_EC2_IP}:8080"
 
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
