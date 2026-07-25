@@ -6,7 +6,7 @@ stages:
   - deploy
 
 variables:
-  IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
+  IMAGE_TAG: "latest"
   CONTAINER_NAME: "springboot-app"
   HOST_PORT: "8080"
   CONTAINER_PORT: "8080"
