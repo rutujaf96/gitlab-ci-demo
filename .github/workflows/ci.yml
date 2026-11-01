@@ -1,74 +1,140 @@
-name: CI Pipeline
+name: "Spring Boot CI/CD Pipeline"
 
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-  workflow_dispatch:
+    branches: [ "main" ]
+  workflow_dispatch: # Allows manual trigger
 
 env:
-  AWS_REGION: eu-north-1
-  ECR_REPOSITORY: springboot-app
+  # Global Variables (matching your GitLab YAML)
+  IMAGE_TAG: "latest"
+  CONTAINER_NAME: "springboot-app"
+  HOST_PORT: "8080"
+  CONTAINER_PORT: "8080"
+  
+  # NOTE: AWS_ACCOUNT_ID, AWS_DEFAULT_REGION, and ECR_REPOSITORY 
+  # must be added to GitHub Secrets and Variables.
+  AWS_REGION: ${{ vars.AWS_DEFAULT_REGION }}
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  TARGET_EC2_IP: ${{ secrets.TARGET_EC2_IP }}
+  AWS_EC2_METADATA_DISABLED: "false"
+  AWS_METADATA_SERVICE_TIMEOUT: "5"
+  AWS_METADATA_SERVICE_NUM_ATTEMPTS: "3"
 
 jobs:
+  # =========================================================
+  # JOB 1: BUILD MAVEN APPLICATION
+  # =========================================================
   build:
-    name: Build and Test
-    runs-on: ubuntu-latest
-
+    runs-on: [self-hosted, dynamic-agent]
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-          cache: maven
+      - name: Build Spring Boot Application
+        run: |
+          echo "Building Spring Boot application..."
+          mvn clean package
 
-      - name: Build with Maven
-        run: mvn clean package
-
-      - name: Upload JAR
+      # GitHub uses artifacts to pass the JAR to the next job
+      - name: Upload JAR Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-jar
+          name: springboot-jar
           path: target/*.jar
+          retention-days: 1
 
-  docker:
-    name: Build and Push Docker Image
-    runs-on: ubuntu-latest
+  # =========================================================
+  # JOB 2: BUILD DOCKER IMAGE AND PUSH TO AWS ECR
+  # =========================================================
+  docker-build-push:
     needs: build
-    if: github.ref == 'refs/heads/main'
-
+    runs-on: [self-hosted, dynamic-agent]
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Download JAR artifact
+      - name: Download JAR Artifact
         uses: actions/download-artifact@v4
         with:
-          name: app-jar
+          name: springboot-jar
           path: target/
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        id: ecr-login
-        uses: aws-actions/amazon-ecr-login@v2
+      - name: Validation Checks
+        run: |
+          if [ -z "${AWS_ACCOUNT_ID:-}" ]; then echo "ERROR: AWS_ACCOUNT_ID is missing"; exit 1; fi
+          if [ -z "${AWS_REGION:-}" ]; then echo "ERROR: AWS_REGION is missing"; exit 1; fi
+          if [ -z "${ECR_REPOSITORY:-}" ]; then echo "ERROR: ECR_REPOSITORY is missing"; exit 1; fi
+          
+          echo "Checking Runner IAM Role..."
+          aws sts get-caller-identity
+          
+          echo "Checking Docker..."
+          docker version
 
       - name: Build and Push Docker Image
-        env:
-          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t $REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker build -t $REGISTRY/$ECR_REPOSITORY:latest .
-          docker push $REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $REGISTRY/$ECR_REPOSITORY:latest
+          export ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          export ECR_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          
+          echo "Docker image is ${ECR_IMAGE}"
+          echo "Building Docker image..."
+          docker build -t "${ECR_IMAGE}" .
+          
+          echo "Logging in to Amazon ECR..."
+          aws ecr get-login-password --region "${AWS_REGION}" | \
+            docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+            
+          echo "Pushing Docker image to ECR..."
+          docker push "${ECR_IMAGE}"
+          
+          echo "Docker image pushed successfully"
+          echo "${ECR_IMAGE}"
+
+  # =========================================================
+  # JOB 3: DEPLOY IMAGE ON TERRAFORM-CREATED EC2
+  # =========================================================
+  deploy-to-ec2:
+    needs: docker-build-push
+    runs-on: [self-hosted, dynamic-agent]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH Key
+        run: |
+          # In GitHub, we write the secret string to a file dynamically
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          
+          if [ -z "${TARGET_EC2_IP:-}" ]; then echo "ERROR: TARGET_EC2_IP is missing"; exit 1; fi
+          
+          echo "Adding EC2 host key..."
+          ssh-keyscan -H "${TARGET_EC2_IP}" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy to EC2
+        run: |
+          echo "Deploying image tag ${IMAGE_TAG} to EC2 ${TARGET_EC2_IP}..."
+          
+          ssh -i ~/.ssh/id_rsa -o BatchMode=yes -o ConnectTimeout=30 "ubuntu@${TARGET_EC2_IP}" "mkdir -p /home/ubuntu/deployment"
+          
+          scp -i ~/.ssh/id_rsa -o BatchMode=yes -o ConnectTimeout=30 deploy.sh "ubuntu@${TARGET_EC2_IP}:/home/ubuntu/deployment/deploy.sh"
+          
+          ssh -i ~/.ssh/id_rsa -o BatchMode=yes -o ConnectTimeout=30 "ubuntu@${TARGET_EC2_IP}" "
+            chmod +x /home/ubuntu/deployment/deploy.sh &&
+            sudo \
+            AWS_ACCOUNT_ID='${AWS_ACCOUNT_ID}' \
+            AWS_DEFAULT_REGION='${AWS_REGION}' \
+            ECR_REPOSITORY='${ECR_REPOSITORY}' \
+            IMAGE_TAG='${IMAGE_TAG}' \
+            CONTAINER_NAME='${CONTAINER_NAME}' \
+            HOST_PORT='${HOST_PORT}' \
+            CONTAINER_PORT='${CONTAINER_PORT}' \
+            /home/ubuntu/deployment/deploy.sh
+          "
+          
+          echo "Deployment completed successfully"
